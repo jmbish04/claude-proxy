@@ -16,7 +16,11 @@
  * - Dynamically selects API endpoints and keys based on the requested model name (e.g., "haiku")
  * or the dynamic URL path.
  * - Designed for easy deployment on Cloudflare Workers.
+ * - Full request/response traceability using D1 database with Drizzle ORM.
  */
+
+import { drizzle } from 'drizzle-orm/d1';
+import { requestTrace } from './db/schema';
 
 // --- TYPE DEFINITIONS ---
 
@@ -30,6 +34,10 @@ export interface Env {
     HAIKU_MODEL_NAME: string;
     HAIKU_BASE_URL: string;
     HAIKU_API_KEY: string;
+    /**
+     * D1 Database binding for request traceability
+     */
+    DB: D1Database;
 }
 
 // --- Claude API Types ---
@@ -110,11 +118,21 @@ interface OpenAIRequest {
 
 export default {
     async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+        // Initialize traceability
+        const requestId = generateRequestId();
+        const startTime = Date.now();
+        const timestamp = new Date();
+        const url = new URL(request.url);
+
+        // Extract client information
+        const clientIp = request.headers.get('cf-connecting-ip') || 'unknown';
+        const userAgent = request.headers.get('user-agent') || 'unknown';
+        const requestHeaders = headersToObject(request.headers);
+
         if (request.method === "OPTIONS") {
             return handleOptions();
         }
 
-        const url = new URL(request.url);
         // All valid requests must end with `/v1/messages`.
         if (!url.pathname.endsWith("/v1/messages")) {
             return new Response("Not Found. URL must end with /v1/messages", { status: 404 });
@@ -187,6 +205,30 @@ export default {
 
             if (!openaiApiResponse.ok) {
                 const errorBody = await openaiApiResponse.text();
+                const durationMs = Date.now() - startTime;
+
+                // Log error trace
+                ctx.waitUntil(logRequestTrace(env.DB, {
+                    requestId,
+                    timestamp,
+                    method: request.method,
+                    url: request.url,
+                    path: url.pathname,
+                    requestHeaders,
+                    requestBody: claudeRequest,
+                    claudeModel: claudeRequest.model,
+                    targetModel: targetModelName,
+                    targetBaseUrl: targetBaseUrl,
+                    responseStatus: openaiApiResponse.status,
+                    responseHeaders: headersToObject(openaiApiResponse.headers),
+                    responseBody: errorBody,
+                    durationMs,
+                    isStreaming: false,
+                    errorMessage: `HTTP ${openaiApiResponse.status}: ${openaiApiResponse.statusText}`,
+                    clientIp,
+                    userAgent,
+                }));
+
                 return new Response(errorBody, {
                     status: openaiApiResponse.status,
                     statusText: openaiApiResponse.statusText,
@@ -195,6 +237,28 @@ export default {
             }
 
             if (claudeRequest.stream) {
+                const durationMs = Date.now() - startTime;
+
+                // Log streaming request (response will be logged later when stream completes)
+                ctx.waitUntil(logRequestTrace(env.DB, {
+                    requestId,
+                    timestamp,
+                    method: request.method,
+                    url: request.url,
+                    path: url.pathname,
+                    requestHeaders,
+                    requestBody: claudeRequest,
+                    claudeModel: claudeRequest.model,
+                    targetModel: targetModelName,
+                    targetBaseUrl: targetBaseUrl,
+                    responseStatus: openaiApiResponse.status,
+                    responseHeaders: headersToObject(openaiApiResponse.headers),
+                    durationMs,
+                    isStreaming: true,
+                    clientIp,
+                    userAgent,
+                }));
+
                 const transformStream = new TransformStream({
                     transform: streamTransformer(claudeRequest.model),
                 });
@@ -204,11 +268,55 @@ export default {
             } else {
                 const openaiResponse = await openaiApiResponse.json();
                 const claudeResponse = convertOpenAIToClaudeResponse(openaiResponse, claudeRequest.model);
+                const durationMs = Date.now() - startTime;
+
+                // Log successful non-streaming request
+                ctx.waitUntil(logRequestTrace(env.DB, {
+                    requestId,
+                    timestamp,
+                    method: request.method,
+                    url: request.url,
+                    path: url.pathname,
+                    requestHeaders,
+                    requestBody: claudeRequest,
+                    claudeModel: claudeRequest.model,
+                    targetModel: targetModelName,
+                    targetBaseUrl: targetBaseUrl,
+                    responseStatus: openaiApiResponse.status,
+                    responseHeaders: headersToObject(openaiApiResponse.headers),
+                    responseBody: claudeResponse,
+                    durationMs,
+                    isStreaming: false,
+                    inputTokens: claudeResponse.usage?.input_tokens,
+                    outputTokens: claudeResponse.usage?.output_tokens,
+                    clientIp,
+                    userAgent,
+                }));
+
                 return new Response(JSON.stringify(claudeResponse), {
                     headers: { "Content-Type": "application/json", ...corsHeaders() },
                 });
             }
         } catch (e: any) {
+            const durationMs = Date.now() - startTime;
+
+            // Log exception trace
+            ctx.waitUntil(logRequestTrace(env.DB, {
+                requestId,
+                timestamp,
+                method: request.method,
+                url: request.url,
+                path: url.pathname,
+                requestHeaders,
+                requestBody: null,
+                responseStatus: 500,
+                durationMs,
+                isStreaming: false,
+                errorMessage: e.message,
+                clientIp,
+                userAgent,
+            }));
+
             return new Response(JSON.stringify({ error: e.message }), {
                 status: 500,
                 headers: { "Content-Type": "application/json", ...corsHeaders() },
@@ -506,4 +614,82 @@ function corsHeaders() {
 
 function handleOptions() {
     return new Response(null, { headers: corsHeaders() });
+}
+
+// --- TRACEABILITY HELPERS ---
+
+/**
+ * Generates a unique request ID
+ */
+function generateRequestId(): string {
+    return `req_${crypto.randomUUID()}`;
+}
+
+/**
+ * Safely stringify headers for storage
+ */
+function headersToObject(headers: Headers): Record<string, string> {
+    const obj: Record<string, string> = {};
+    headers.forEach((value, key) => {
+        obj[key] = value;
+    });
+    return obj;
+}
+
+/**
+ * Logs request/response trace to D1 database
+ */
+async function logRequestTrace(
+    db: D1Database,
+    trace: {
+        requestId: string;
+        timestamp: Date;
+        method: string;
+        url: string;
+        path: string;
+        requestHeaders: Record<string, string>;
+        requestBody: any;
+        claudeModel?: string;
+        targetModel?: string;
+        targetBaseUrl?: string;
+        responseStatus?: number;
+        responseHeaders?: Record<string, string>;
+        responseBody?: any;
+        durationMs?: number;
+        isStreaming?: boolean;
+        errorMessage?: string;
+        inputTokens?: number;
+        outputTokens?: number;
+        clientIp?: string;
+        userAgent?: string;
+    }
+): Promise<void> {
+    try {
+        const dbClient = drizzle(db);
+        await dbClient.insert(requestTrace).values({
+            requestId: trace.requestId,
+            timestamp: trace.timestamp,
+            method: trace.method,
+            url: trace.url,
+            path: trace.path,
+            requestHeaders: JSON.stringify(trace.requestHeaders),
+            requestBody: trace.requestBody ? JSON.stringify(trace.requestBody) : null,
+            claudeModel: trace.claudeModel,
+            targetModel: trace.targetModel,
+            targetBaseUrl: trace.targetBaseUrl,
+            responseStatus: trace.responseStatus,
+            responseHeaders: trace.responseHeaders ? JSON.stringify(trace.responseHeaders) : null,
+            responseBody: trace.responseBody ? JSON.stringify(trace.responseBody) : null,
+            durationMs: trace.durationMs,
+            isStreaming: trace.isStreaming,
+            errorMessage: trace.errorMessage,
+            inputTokens: trace.inputTokens,
+            outputTokens: trace.outputTokens,
+            clientIp: trace.clientIp,
+            userAgent: trace.userAgent,
+        });
+    } catch (e: any) {
+        // Log the error but don't fail the request
+        console.error('Failed to log request trace:', e.message);
+    }
 }

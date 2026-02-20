@@ -1,0 +1,49 @@
+{
+  // Cloudflare Workers configuration for claude-proxy
+  // JSONC format with verbose observability enabled
+
+  "name": "claude-proxy",
+  "main": "src/index.ts",
+  "compatibility_date": "2024-03-20",
+
+  // Environment variables
+  "vars": {
+    "HAIKU_MODEL_NAME": "@cf/qwen/qwen1.5-7b-chat-awq",
+    "HAIKU_BASE_URL": "https://claude-code-proxy.hacolby.workers.dev",
+    "HAIKU_API_KEY": "sk-**"
+  },
+
+  // D1 Database bindings for request traceability
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "claude-proxy-db",
+      "database_id": "preview_database_id"
+    }
+  ],
+
+  // Observability settings - verbose logging enabled
+  "observability": {
+    "enabled": true,
+    "logs": {
+      "enabled": true,
+      // Send all invocation logs to the dashboard for monitoring
+      "invocation_logs": true
+    }
+  },
+
+  // Additional observability features (optional)
+  "logpush": false,
+
+  // Tail consumers for live log streaming (optional - uncomment to enable)
+  // "tail_consumers": [
+  //   {
+  //     "service": "my-log-consumer"
+  //   }
+  // ],
+
+  // Build configuration
+  "build": {
+    "command": ""
+  }
+}

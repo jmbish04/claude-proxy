@@ -1,0 +1,33 @@
+{
+  "name": "claude-proxy",
+  "version": "1.0.0",
+  "description": "Claude-to-OpenAI API Proxy for Cloudflare Workers",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "npm run drizzle:generate && npm run migrate:remote && wrangler deploy",
+    "drizzle:generate": "drizzle-kit generate",
+    "migrate:local": "wrangler d1 migrations apply DB --local",
+    "migrate:remote": "wrangler d1 migrations apply DB --remote",
+    "db:studio": "drizzle-kit studio"
+  },
+  "keywords": [
+    "claude",
+    "openai",
+    "api",
+    "proxy",
+    "cloudflare",
+    "workers"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250110.0",
+    "drizzle-kit": "^0.30.0",
+    "typescript": "^5.7.3",
+    "wrangler": "^3.102.0"
+  },
+  "dependencies": {
+    "drizzle-orm": "^0.39.3"
+  }
+}
