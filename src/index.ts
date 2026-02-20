@@ -622,7 +622,7 @@ function handleOptions() {
  * Generates a unique request ID
  */
 function generateRequestId(): string {
-    return `req_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`;
+    return `req_${crypto.randomUUID()}`;
 }
 
 /**
